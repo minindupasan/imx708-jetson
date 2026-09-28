@@ -9,7 +9,7 @@
 #   imx708-live.sh [options] yuv <out.yuv>         # raw I420 frames (rpicam-vid --codec yuv420)
 #   imx708-live.sh [options] rgb <out.rgb>         # raw packed RGB888 frames
 # Stills:
-#   imx708-live.sh still <out.jpg|.png|.bmp|.yuv|.rgb> [--raw] [-e ENC] [--timeout MS] [--quality Q]
+#   imx708-live.sh [options] still <out.jpg|.png|.bmp|.yuv|.rgb> [--raw] [-e ENC] [--timeout MS] [--quality Q]
 #                                                  # --raw also writes <out>.dng
 #
 # Options: --mode full|binned|crop|hdr   4608x2592 (<=14 fps) | 2304x1296 (<=56) | 1536x864 (<=120) | HDR 2304x1296 (30)
@@ -20,13 +20,6 @@ set -e
 dir=$(cd "$(dirname "$0")" && pwd)
 bin="$dir/../isp/imx708-live"
 
-if [[ $1 == still ]]; then
-	shift
-	out=${1:?usage: $0 still <file> [options]}
-	shift
-	exec "$bin" --still "$out" "$@"
-fi
-
 opts=()
 mode=binned
 while [[ $1 == --* ]]; do
@@ -34,6 +27,13 @@ while [[ $1 == --* ]]; do
 	opts+=("$1" "$2")
 	shift 2
 done
+
+if [[ $1 == still ]]; then
+	shift
+	out=${1:?usage: $0 still <file> [options]}
+	shift
+	exec "$bin" "${opts[@]}" --still "$out" "$@"
+fi
 
 # The Orin Nano has no hardware video encoder: x264 in software, sized for the CPU budget.
 case "$mode" in

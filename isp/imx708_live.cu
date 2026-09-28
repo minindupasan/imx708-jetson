@@ -1455,8 +1455,9 @@ int main(int argc, char** argv) {
 	        still ? still_path.c_str() : sink.c_str());
 	const double t_start = now_s();
 
+	bool stdin_open = true;
 	while (!g_quit) {
-		pollfd pf[2] = {{cam.fd, POLLIN, 0}, {STDIN_FILENO, POLLIN, 0}};
+		pollfd pf[2] = {{cam.fd, POLLIN, 0}, {stdin_open ? STDIN_FILENO : -1, POLLIN, 0}};
 		if (poll(pf, 2, 2000) <= 0) {
 			fprintf(stderr, "\nno frames from sensor\n");
 			break;
@@ -1465,7 +1466,7 @@ int main(int argc, char** argv) {
 		if (pf[1].revents & POLLIN) {
 			char line[64] = {0};
 			if (!fgets(line, sizeof line, stdin)) {
-				pf[1].fd = -1;
+				stdin_open = false;  // EOF: stop polling it, or poll() returns at once forever
 			} else if (line[0] == 'q') {
 				break;
 			} else if (line[0] == 'f') {

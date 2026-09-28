@@ -67,7 +67,8 @@ scripts/imx708-live.sh still photo.jpg --raw       # photo.jpg + photo.dng
 ```
 
 Video defaults to 30 fps in the 2x2 binned mode. The Orin Nano has no hardware video encoder, so
-H.264 is done in software by x264 at 1080p.
+H.264 is done in software by x264 at 1080p, which is good for about 30 fps. Options go before the
+output (`scripts/imx708-live.sh --mode binned still photo.png`).
 
 Sensor modes (`--mode`):
 
@@ -141,10 +142,12 @@ Applied on top of RidgeRun's `7.2.1_orin_nano_imx708_v0.1.0.patch`:
 
 ## Status
 
-Tested: video in the full, binned and crop modes; auto exposure, white balance, autofocus and
-flicker detection.
+Tested on the hardware above: video in all four modes, every output (display excepted, the test
+board was headless), stills in each format, DNG output, auto exposure, white balance, autofocus,
+manual focus and flicker detection.
 
-Not tested on hardware yet: HDR mode, still capture and DNG output.
+The HDR mode works but has only been tried in a dim room; its image is noisier than the binned
+mode and has a slight magenta cast. The DNG files haven't been checked in a raw converter yet.
 
 ## License
 

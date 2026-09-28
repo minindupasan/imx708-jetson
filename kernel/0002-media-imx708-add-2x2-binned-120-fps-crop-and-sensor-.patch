@@ -1,0 +1,672 @@
+From 11eb193cf4117adeed2f212e30a2a92c198d1a61 Mon Sep 17 00:00:00 2001
+From: minindupasan <minindupasan@gmail.com>
+Date: Mon, 28 Sep 2026 21:47:13 +0530
+Subject: [PATCH 2/3] media: imx708: add 2x2 binned, 120 fps crop and sensor
+ HDR modes
+
+Add the remaining Raspberry Pi imx708 sensor modes. The register tables
+come from the Raspberry Pi Linux driver; the default link frequency PLL
+setting (0x030e/0x030f), which that driver writes separately, is
+included in each table as it is for the existing mode:
+
+  mode 1: 2304x1296, 2x2 binned, up to 56 fps
+  mode 2: 1536x864, 2x2 binned centre crop, up to 120 fps
+  mode 3: 2304x1296, on-sensor HDR (QBC), 30 fps
+
+In HDR mode the programmed exposure is the long one (medium and short
+are 1/4 and 1/16 of it) and must be at least 128 lines, in steps of 32.
+
+Add the matching mode nodes to the dual-camera overlay.
+---
+ .../tegra234-p3768-camera-rpicam3-imx708.dts  | 243 +++++++++++++
+ .../drivers/media/i2c/imx708_mode_tbls.h      | 325 ++++++++++++++++++
+ nvidia-oot/drivers/media/i2c/nv_imx708.c      |   8 +
+ nvidia-oot/include/media/imx708.h             |   2 +
+ 4 files changed, 578 insertions(+)
+
+diff --git a/hardware/nvidia/t23x/nv-public/overlay/tegra234-p3768-camera-rpicam3-imx708.dts b/hardware/nvidia/t23x/nv-public/overlay/tegra234-p3768-camera-rpicam3-imx708.dts
+index a03c591..f127664 100644
+--- a/hardware/nvidia/t23x/nv-public/overlay/tegra234-p3768-camera-rpicam3-imx708.dts
++++ b/hardware/nvidia/t23x/nv-public/overlay/tegra234-p3768-camera-rpicam3-imx708.dts
+@@ -210,6 +210,126 @@
+ 								default_exp_time = "1600";
+ 								embedded_metadata_height = "4";
+ 							};
++							/* IMX708_MODE_2304x1296_56fps (2x2 binned) */
++							mode1 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_b";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "6";
++								active_w = "2304";
++								active_h = "1296";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "3976";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "56000000";
++								step_framerate = "1";
++								default_framerate = "56000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
++							/* IMX708_MODE_1536x864_120fps (2x2 binned, centre crop) */
++							mode2 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_b";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "6";
++								active_w = "1536";
++								active_h = "864";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "2741";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "120000000";
++								step_framerate = "1";
++								default_framerate = "120000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
++							/* IMX708_MODE_2304x1296_HDR_30fps (sensor HDR, 2x2 downscaled) */
++							mode3 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_b";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "6";
++								active_w = "2304";
++								active_h = "1296";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "1996";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "30000000";
++								step_framerate = "1";
++								default_framerate = "30000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
+ 
+ 							ports {
+ 								#address-cells = <1>;
+@@ -283,6 +403,129 @@
+ 								default_exp_time = "1600";
+ 								embedded_metadata_height = "4";
+ 							};
++							/* IMX708_MODE_2304x1296_56fps (2x2 binned) */
++							mode1 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_c";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "0";
++
++								active_w = "2304";
++								active_h = "1296";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "3976";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "56000000";
++								step_framerate = "1";
++								default_framerate = "56000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
++							/* IMX708_MODE_1536x864_120fps (2x2 binned, centre crop) */
++							mode2 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_c";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "0";
++
++								active_w = "1536";
++								active_h = "864";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "2741";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "120000000";
++								step_framerate = "1";
++								default_framerate = "120000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
++							/* IMX708_MODE_2304x1296_HDR_30fps (sensor HDR, 2x2 downscaled) */
++							mode3 {
++								mclk_khz = "24000";
++								num_lanes = "2";
++								tegra_sinterface = "serial_c";
++								phy_mode = "DPHY";
++								discontinuous_clk = "yes";
++								dpcm_enable = "false";
++								cil_settletime = "0";
++								lane_polarity = "0";
++
++								active_w = "2304";
++								active_h = "1296";
++								mode_type = "bayer";
++								pixel_phase = "rggb";
++								csi_pixel_bit_depth = "10";
++								readout_orientation = "90";
++								line_length = "1996";
++								inherent_gain = "1";
++								mclk_multiplier = "80";
++								pix_clk_hz = "297600000";
++
++								gain_factor = "16";
++								framerate_factor = "1000000";
++								exposure_factor = "1000000";
++								min_gain_val = "16";
++								max_gain_val = "256";
++								step_gain_val = "1";
++								default_gain = "16";
++								min_hdr_ratio = "1";
++								max_hdr_ratio = "1";
++								min_framerate = "2000000";
++								max_framerate = "30000000";
++								step_framerate = "1";
++								default_framerate = "30000000";
++								min_exp_time = "500";
++								max_exp_time = "65487";
++								step_exp_time = "1";
++								default_exp_time = "1600";
++								embedded_metadata_height = "4";
++							};
+ 
+ 							ports {
+ 								#address-cells = <1>;
+diff --git a/nvidia-oot/drivers/media/i2c/imx708_mode_tbls.h b/nvidia-oot/drivers/media/i2c/imx708_mode_tbls.h
+index 91a2330..b103b99 100644
+--- a/nvidia-oot/drivers/media/i2c/imx708_mode_tbls.h
++++ b/nvidia-oot/drivers/media/i2c/imx708_mode_tbls.h
+@@ -198,8 +198,314 @@ static const imx708_reg imx708_mode_4608x2592_14fps[] = {
+ 	{IMX708_TABLE_END, 0x0000}
+ };
+ 
++/* 2x2 binned, full field of view (register values from the Raspberry Pi imx708 driver) */
++static const imx708_reg imx708_mode_2304x1296_56fps[] = {
++	{0x0342, 0x1E},
++	{0x0343, 0x90},
++	{0x0340, 0x05},
++	{0x0341, 0x38},
++	{0x0344, 0x00},
++	{0x0345, 0x00},
++	{0x0346, 0x00},
++	{0x0347, 0x00},
++	{0x0348, 0x11},
++	{0x0349, 0xFF},
++	{0x034A, 0x0A},
++	{0x034B, 0x1F},
++	{0x0220, 0x62},
++	{0x0222, 0x01},
++	{0x0900, 0x01},
++	{0x0901, 0x22},
++	{0x0902, 0x08},
++	{0x3200, 0x41},
++	{0x3201, 0x41},
++	{0x32D5, 0x00},
++	{0x32D6, 0x00},
++	{0x32DB, 0x01},
++	{0x32DF, 0x00},
++	{0x350C, 0x00},
++	{0x350D, 0x00},
++	{0x0408, 0x00},
++	{0x0409, 0x00},
++	{0x040A, 0x00},
++	{0x040B, 0x00},
++	{0x040C, 0x09},
++	{0x040D, 0x00},
++	{0x040E, 0x05},
++	{0x040F, 0x10},
++	{0x034C, 0x09},
++	{0x034D, 0x00},
++	{0x034E, 0x05},
++	{0x034F, 0x10},
++	{0x0301, 0x05},
++	{0x0303, 0x02},
++	{0x0305, 0x02},
++	{0x0306, 0x00},
++	{0x0307, 0x7A},
++	{0x030B, 0x02},
++	{0x030D, 0x04},
++	{0x0310, 0x01},
++	{0x3CA0, 0x00},
++	{0x3CA1, 0x3C},
++	{0x3CA4, 0x00},
++	{0x3CA5, 0x3C},
++	{0x3CA6, 0x00},
++	{0x3CA7, 0x00},
++	{0x3CAA, 0x00},
++	{0x3CAB, 0x00},
++	{0x3CB8, 0x00},
++	{0x3CB9, 0x1C},
++	{0x3CBA, 0x00},
++	{0x3CBB, 0x08},
++	{0x3CBC, 0x00},
++	{0x3CBD, 0x1E},
++	{0x3CBE, 0x00},
++	{0x3CBF, 0x0A},
++	{0x0202, 0x05},
++	{0x0203, 0x08},
++	{0x0224, 0x01},
++	{0x0225, 0xF4},
++	{0x3116, 0x01},
++	{0x3117, 0xF4},
++	{0x0204, 0x00},
++	{0x0205, 0x70},
++	{0x0216, 0x00},
++	{0x0217, 0x70},
++	{0x0218, 0x01},
++	{0x0219, 0x00},
++	{0x020E, 0x01},
++	{0x020F, 0x00},
++	{0x3118, 0x00},
++	{0x3119, 0x70},
++	{0x311A, 0x01},
++	{0x311B, 0x00},
++	{0x341a, 0x00},
++	{0x341b, 0x00},
++	{0x341c, 0x00},
++	{0x341d, 0x00},
++	{0x341e, 0x00},
++	{0x341f, 0x90},
++	{0x3420, 0x00},
++	{0x3421, 0x6c},
++	{0x3366, 0x00},
++	{0x3367, 0x00},
++	{0x3368, 0x00},
++	{0x3369, 0x00},
++	/* 450 MHz link frequency */
++	{0x030E, 0x01},
++	{0x030F, 0x2C},
++	{IMX708_TABLE_WAIT_MS, IMX708_WAIT_MS},
++	{IMX708_TABLE_END, 0x0000}
++};
++
++/* 2x2 binned, centre crop of 3072x1728 (register values from the Raspberry Pi imx708 driver) */
++static const imx708_reg imx708_mode_1536x864_120fps[] = {
++	{0x0342, 0x14},
++	{0x0343, 0x60},
++	{0x0340, 0x04},
++	{0x0341, 0xB6},
++	{0x0344, 0x03},
++	{0x0345, 0x00},
++	{0x0346, 0x01},
++	{0x0347, 0xB0},
++	{0x0348, 0x0E},
++	{0x0349, 0xFF},
++	{0x034A, 0x08},
++	{0x034B, 0x6F},
++	{0x0220, 0x62},
++	{0x0222, 0x01},
++	{0x0900, 0x01},
++	{0x0901, 0x22},
++	{0x0902, 0x08},
++	{0x3200, 0x41},
++	{0x3201, 0x41},
++	{0x32D5, 0x00},
++	{0x32D6, 0x00},
++	{0x32DB, 0x01},
++	{0x32DF, 0x01},
++	{0x350C, 0x00},
++	{0x350D, 0x00},
++	{0x0408, 0x00},
++	{0x0409, 0x00},
++	{0x040A, 0x00},
++	{0x040B, 0x00},
++	{0x040C, 0x06},
++	{0x040D, 0x00},
++	{0x040E, 0x03},
++	{0x040F, 0x60},
++	{0x034C, 0x06},
++	{0x034D, 0x00},
++	{0x034E, 0x03},
++	{0x034F, 0x60},
++	{0x0301, 0x05},
++	{0x0303, 0x02},
++	{0x0305, 0x02},
++	{0x0306, 0x00},
++	{0x0307, 0x76},
++	{0x030B, 0x02},
++	{0x030D, 0x04},
++	{0x0310, 0x01},
++	{0x3CA0, 0x00},
++	{0x3CA1, 0x3C},
++	{0x3CA4, 0x01},
++	{0x3CA5, 0x5E},
++	{0x3CA6, 0x00},
++	{0x3CA7, 0x00},
++	{0x3CAA, 0x00},
++	{0x3CAB, 0x00},
++	{0x3CB8, 0x00},
++	{0x3CB9, 0x0C},
++	{0x3CBA, 0x00},
++	{0x3CBB, 0x04},
++	{0x3CBC, 0x00},
++	{0x3CBD, 0x1E},
++	{0x3CBE, 0x00},
++	{0x3CBF, 0x05},
++	{0x0202, 0x04},
++	{0x0203, 0x86},
++	{0x0224, 0x01},
++	{0x0225, 0xF4},
++	{0x3116, 0x01},
++	{0x3117, 0xF4},
++	{0x0204, 0x00},
++	{0x0205, 0x70},
++	{0x0216, 0x00},
++	{0x0217, 0x70},
++	{0x0218, 0x01},
++	{0x0219, 0x00},
++	{0x020E, 0x01},
++	{0x020F, 0x00},
++	{0x3118, 0x00},
++	{0x3119, 0x70},
++	{0x311A, 0x01},
++	{0x311B, 0x00},
++	{0x341a, 0x00},
++	{0x341b, 0x00},
++	{0x341c, 0x00},
++	{0x341d, 0x00},
++	{0x341e, 0x00},
++	{0x341f, 0x60},
++	{0x3420, 0x00},
++	{0x3421, 0x48},
++	{0x3366, 0x00},
++	{0x3367, 0x00},
++	{0x3368, 0x00},
++	{0x3369, 0x00},
++	/* 450 MHz link frequency */
++	{0x030E, 0x01},
++	{0x030F, 0x2C},
++	{IMX708_TABLE_WAIT_MS, IMX708_WAIT_MS},
++	{IMX708_TABLE_END, 0x0000}
++};
++
++/* Sensor HDR: 2x2 downscaled, long/medium/short exposures (ratio 4) merged on-chip
++ * (register values from the Raspberry Pi imx708 driver) */
++static const imx708_reg imx708_mode_2304x1296_hdr_30fps[] = {
++	{0x0342, 0x14},
++	{0x0343, 0x60},
++	{0x0340, 0x0A},
++	{0x0341, 0x5B},
++	{0x0344, 0x00},
++	{0x0345, 0x00},
++	{0x0346, 0x00},
++	{0x0347, 0x00},
++	{0x0348, 0x11},
++	{0x0349, 0xFF},
++	{0x034A, 0x0A},
++	{0x034B, 0x1F},
++	{0x0220, 0x01},
++	{0x0222, 0x04},
++	{0x0900, 0x00},
++	{0x0901, 0x11},
++	{0x0902, 0x0A},
++	{0x3200, 0x01},
++	{0x3201, 0x01},
++	{0x32D5, 0x00},
++	{0x32D6, 0x00},
++	{0x32DB, 0x01},
++	{0x32DF, 0x00},
++	{0x350C, 0x00},
++	{0x350D, 0x00},
++	{0x0408, 0x00},
++	{0x0409, 0x00},
++	{0x040A, 0x00},
++	{0x040B, 0x00},
++	{0x040C, 0x09},
++	{0x040D, 0x00},
++	{0x040E, 0x05},
++	{0x040F, 0x10},
++	{0x034C, 0x09},
++	{0x034D, 0x00},
++	{0x034E, 0x05},
++	{0x034F, 0x10},
++	{0x0301, 0x05},
++	{0x0303, 0x02},
++	{0x0305, 0x02},
++	{0x0306, 0x00},
++	{0x0307, 0xA2},
++	{0x030B, 0x02},
++	{0x030D, 0x04},
++	{0x0310, 0x01},
++	{0x3CA0, 0x00},
++	{0x3CA1, 0x00},
++	{0x3CA4, 0x00},
++	{0x3CA5, 0x00},
++	{0x3CA6, 0x00},
++	{0x3CA7, 0x28},
++	{0x3CAA, 0x00},
++	{0x3CAB, 0x00},
++	{0x3CB8, 0x00},
++	{0x3CB9, 0x30},
++	{0x3CBA, 0x00},
++	{0x3CBB, 0x00},
++	{0x3CBC, 0x00},
++	{0x3CBD, 0x32},
++	{0x3CBE, 0x00},
++	{0x3CBF, 0x00},
++	{0x0202, 0x0A},
++	{0x0203, 0x2B},
++	{0x0224, 0x0A},
++	{0x0225, 0x2B},
++	{0x3116, 0x0A},
++	{0x3117, 0x2B},
++	{0x0204, 0x00},
++	{0x0205, 0x00},
++	{0x0216, 0x00},
++	{0x0217, 0x00},
++	{0x0218, 0x01},
++	{0x0219, 0x00},
++	{0x020E, 0x01},
++	{0x020F, 0x00},
++	{0x3118, 0x00},
++	{0x3119, 0x00},
++	{0x311A, 0x01},
++	{0x311B, 0x00},
++	{0x341a, 0x00},
++	{0x341b, 0x00},
++	{0x341c, 0x00},
++	{0x341d, 0x00},
++	{0x341e, 0x00},
++	{0x341f, 0x90},
++	{0x3420, 0x00},
++	{0x3421, 0x6c},
++	{0x3360, 0x01},
++	{0x3361, 0x01},
++	{0x3366, 0x09},
++	{0x3367, 0x00},
++	{0x3368, 0x05},
++	{0x3369, 0x10},
++	/* 450 MHz link frequency */
++	{0x030E, 0x01},
++	{0x030F, 0x2C},
++	{IMX708_TABLE_WAIT_MS, IMX708_WAIT_MS},
++	{IMX708_TABLE_END, 0x0000}
++};
++
+ enum {
+ 	IMX708_MODE_4608x2592_14FPS,
++	IMX708_MODE_2304x1296_56FPS,
++	IMX708_MODE_1536x864_120FPS,
++	IMX708_MODE_2304x1296_HDR_30FPS,
+ 	IMX708_MODE_COMMON,
+ 	IMX708_START_STREAM,
+ 	IMX708_STOP_STREAM,
+@@ -207,6 +513,9 @@ enum {
+ 
+ static const imx708_reg *mode_table[] = {
+ 	[IMX708_MODE_4608x2592_14FPS] = imx708_mode_4608x2592_14fps,
++	[IMX708_MODE_2304x1296_56FPS] = imx708_mode_2304x1296_56fps,
++	[IMX708_MODE_1536x864_120FPS] = imx708_mode_1536x864_120fps,
++	[IMX708_MODE_2304x1296_HDR_30FPS] = imx708_mode_2304x1296_hdr_30fps,
+ 	[IMX708_MODE_COMMON] = imx708_mode_common,
+ 	[IMX708_START_STREAM] = imx708_start,
+ 	[IMX708_STOP_STREAM] = imx708_stop,
+@@ -216,7 +525,23 @@ static const int imx708_14_fr[] = {
+ 	14,
+ };
+ 
++static const int imx708_56_fr[] = {
++	56,
++};
++
++static const int imx708_120_fr[] = {
++	120,
++};
++
++static const int imx708_30_fr[] = {
++	30,
++};
++
+ static const struct camera_common_frmfmt imx708_frmfmt[] = {
+ 	{{4608, 2592}, imx708_14_fr, 1, 0, IMX708_MODE_4608x2592_14FPS},
++	{{2304, 1296}, imx708_56_fr, 1, 0, IMX708_MODE_2304x1296_56FPS},
++	{{1536, 864}, imx708_120_fr, 1, 0, IMX708_MODE_1536x864_120FPS},
++	/* selected by sensor_mode (use_sensor_mode_id), same size as the binned mode */
++	{{2304, 1296}, imx708_30_fr, 1, 0, IMX708_MODE_2304x1296_HDR_30FPS},
+ };
+ #endif
+diff --git a/nvidia-oot/drivers/media/i2c/nv_imx708.c b/nvidia-oot/drivers/media/i2c/nv_imx708.c
+index d4d73b1..3785aa6 100644
+--- a/nvidia-oot/drivers/media/i2c/nv_imx708.c
++++ b/nvidia-oot/drivers/media/i2c/nv_imx708.c
+@@ -263,6 +263,14 @@ static int imx708_set_exposure(struct tegracam_device *tc_dev, s64 val)
+ 	    / mode->control_properties.exposure_factor
+ 	    / mode->image_properties.line_length;
+ 
++	/* HDR mode: this is the long exposure (medium = long / 4, short = long / 16);
++	 * the sensor needs at least 128 lines in steps of 32 (Raspberry Pi imx708 driver). */
++	if (s_data->mode == IMX708_MODE_2304x1296_HDR_30FPS) {
++		if (coarse_time < IMX708_HDR_EXPOSURE_MIN)
++			coarse_time = IMX708_HDR_EXPOSURE_MIN;
++		coarse_time -= coarse_time % IMX708_HDR_EXPOSURE_STEP;
++	}
++
+ 	/* The integration time must fit inside the frame. */
+ 	if (priv->frame_length > IMX708_EXPOSURE_OFFSET &&
+ 	    coarse_time > priv->frame_length - IMX708_EXPOSURE_OFFSET)
+diff --git a/nvidia-oot/include/media/imx708.h b/nvidia-oot/include/media/imx708.h
+index da5105f..a6554bf 100644
+--- a/nvidia-oot/include/media/imx708.h
++++ b/nvidia-oot/include/media/imx708.h
+@@ -27,6 +27,8 @@
+ #define IMX708_ANALOG_GAIN_C0		        (516)
+ #define IMX708_ANALOG_GAIN_CODE_MAX		(960)
+ #define IMX708_EXPOSURE_OFFSET			(48)
++#define IMX708_HDR_EXPOSURE_MIN			(128)
++#define IMX708_HDR_EXPOSURE_STEP		(32)
+ #define IMX708_SHIFT_8_BITS			(8)
+ #define IMX708_MIN_FRAME_LENGTH		        (256)
+ #define IMX708_MAX_FRAME_LENGTH		        (65535)

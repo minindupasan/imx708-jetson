@@ -1,0 +1,7 @@
+This project is made of files under two licences. Each file has an SPDX identifier.
+
+GPL-2.0: kernel/, scripts/build-driver.sh
+BSD-2-Clause: isp/, scripts/imx708-live.sh, scripts/imx708-focus.sh, and the project documentation
+
+The full texts are in LICENSES/. The original copyright notices of NVIDIA, RidgeRun and
+Raspberry Pi are kept in the files they apply to.

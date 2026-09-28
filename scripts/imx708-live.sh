@@ -40,7 +40,7 @@ case "$mode" in
 crop | 1536) enc_size="width=1536,height=864" ;;
 *) enc_size="width=1920,height=1080" ;;
 esac
-enc="nvvidconv ! video/x-raw,format=I420,$enc_size ! x264enc tune=zerolatency speed-preset=superfast bitrate=12000 key-int-max=30 threads=4"
+enc="nvvidconv ! video/x-raw,format=I420,$enc_size ! x264enc tune=zerolatency speed-preset=ultrafast bitrate=12000 key-int-max=30 threads=6"
 
 case "$1" in
 display)

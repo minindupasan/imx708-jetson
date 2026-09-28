@@ -1603,7 +1603,7 @@ int main(int argc, char** argv) {
 				snprintf(enc, sizeof enc, "jpegenc quality=%d", quality);
 				ok = write_gst_image(still_path.c_str(), img.data(), cam.w, cam.h, enc);
 			} else if (encoding == "png") {
-				ok = write_gst_image(still_path.c_str(), img.data(), cam.w, cam.h, "pngenc");
+				ok = write_gst_image(still_path.c_str(), img.data(), cam.w, cam.h, "video/x-raw,format=RGB ! pngenc");
 			} else if (encoding == "bmp") {
 				ok = write_bmp(still_path.c_str(), img.data(), cam.w, cam.h);
 			} else if (encoding == "rgb") {

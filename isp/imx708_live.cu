@@ -1458,7 +1458,9 @@ int main(int argc, char** argv) {
 	bool stdin_open = true;
 	while (!g_quit) {
 		pollfd pf[2] = {{cam.fd, POLLIN, 0}, {stdin_open ? STDIN_FILENO : -1, POLLIN, 0}};
-		if (poll(pf, 2, 2000) <= 0) {
+		int n = poll(pf, 2, 2000);
+		if (n < 0 && errno == EINTR) continue;  // Ctrl-C: g_quit is set
+		if (n <= 0) {
 			fprintf(stderr, "\nno frames from sensor\n");
 			break;
 		}

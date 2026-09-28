@@ -28,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <mutex>
 #include <vector>
 
 #include <fcntl.h>
@@ -1233,6 +1234,18 @@ static bool write_dng(const char* path, const uint16_t* raw, int stride, int w, 
 	    (float)((m[0] * m[4] - m[1] * m[3]) / det)};
 	float neutral[3] = {(float)(1 / gain_r), 1.f, (float)(1 / gain_b)};
 
+	// libtiff only knows the CFA tags as EXIF tags, so register them for the main IFD.
+	static TIFFExtendProc parent_extender;
+	static const TIFFFieldInfo cfa_fields[] = {
+	    {TIFFTAG_CFAREPEATPATTERNDIM, 2, 2, TIFF_SHORT, FIELD_CUSTOM, 1, 0, (char*)"CFARepeatPatternDim"},
+	    {TIFFTAG_CFAPATTERN, -1, -1, TIFF_BYTE, FIELD_CUSTOM, 1, 1, (char*)"CFAPattern"}};
+	static std::once_flag once;
+	std::call_once(once, [] {
+		parent_extender = TIFFSetTagExtender([](TIFF* t) {
+			TIFFMergeFieldInfo(t, cfa_fields, 2);
+			if (parent_extender) parent_extender(t);
+		});
+	});
 	TIFF* tif = TIFFOpen(path, "w");
 	if (!tif) return false;
 	const short cfa_dim[] = {2, 2};

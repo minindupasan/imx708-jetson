@@ -824,10 +824,11 @@ struct Agc {
 		      (full_y / rpi::LUX_REF_Y) * rpi::LUX_REF_LUX;
 
 		target_y = std::min(0.9, pwl(rpi::AGC_Y_TARGET, 3, lux));
+		measured_y = initial_y(z, wb, 1.0);
 		double gain = 1.0;
 		for (int i = 0; i < 8; i++) {
-			measured_y = initial_y(z, wb, gain);
-			const double extra = std::min(10.0, target_y / (measured_y + 0.001));
+			const double y = i ? initial_y(z, wb, gain) : measured_y;
+			const double extra = std::min(10.0, target_y / (y + 0.001));
 			gain *= extra;
 			if (extra < 1.01) break;
 		}

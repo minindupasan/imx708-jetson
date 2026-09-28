@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.1.0 - 2026-09-28
 
 First release, for JetPack 7.2.1 (L4T R39.2.1) on the Orin Nano.
 

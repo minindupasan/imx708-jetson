@@ -14,9 +14,16 @@
 // Per-frame rates in the tuning assume ~30 fps; they are rescaled to the real frame rate.
 //
 // Video: frames go to a GStreamer sink pipeline. Stills (--still): runs AE/AWB/AF for --timeout
-// ms, then saves one frame as jpeg/png/bmp/yuv420/rgb and optionally a DNG raw (--raw).
+// ms, then saves one frame as jpeg/png/bmp/yuv420/rgb and optionally a DNG raw (--raw). A sink
+// pipeline given with --still gets the video frames until then.
 //
-// stdin commands: f = autofocus scan, c = continuous AF, m <lens code 0-1023> = manual focus, q = quit
+// stdin commands, after libcamera's AF controls:
+//   f                   auto mode (AfModeAuto) and start a scan (AfTrigger)
+//   c                   continuous mode (AfModeContinuous)
+//   w X Y W H [X Y ...] AF windows (AfWindows), fractions of the frame, up to 10; w alone for
+//                       the default window
+//   m CODE              manual mode, lens at CODE (445 = infinity .. 925 = closest)
+//   q                   quit
 
 #include <algorithm>
 #include <atomic>
@@ -72,6 +79,8 @@ constexpr int FULL_W = 4608, FULL_H = 2592;
 constexpr int ZX = 16, ZY = 12, NZ = ZX * ZY;  // AGC/AWB/ALSC zone grid (as on the Pi)
 constexpr int HIST_BINS = 128;
 constexpr int GRID_X = 8;  // column segments of the per-row profile (flicker detector)
+constexpr int FX = 64, FY = 48, NF = FX * FY;  // focus statistics grid
+constexpr int CELL = 6;                         // floats per focus cell (see focus_kernel)
 
 // V4L2 controls exposed by the tegracam imx708 driver
 constexpr uint32_t CID_SENSOR_MODE = 0x009a2008;
@@ -120,8 +129,7 @@ static int rescale_frames(int frames, int fps) { return std::max(1, (int)lround(
 constexpr int ST_ZONE = 0;                           // NZ x {R, G, B, n} over all pixels (AGC)
 constexpr int ST_ZONE_UNSAT = ST_ZONE + NZ * 4;      // NZ x {R, G, B, n} unsaturated only (AWB)
 constexpr int ST_HIST = ST_ZONE_UNSAT + NZ * 4;      // Y histogram
-constexpr int ST_AF = ST_HIST + HIST_BINS;           // {sharp, r, g, b, n} in the AF window
-constexpr int ST_COUNT = ST_AF + 5;
+constexpr int ST_COUNT = ST_HIST + HIST_BINS;
 
 struct IspParams {
 	float gain[3];      // WB gain * digital gain per channel (R, G, B)
@@ -132,8 +140,7 @@ struct IspParams {
 
 struct StatParams {
 	int qw, qh;
-	int roi_x0, roi_x1, roi_y0, roi_y1;  // AF window in quads
-	int box;
+	int box;  // focus measure on 2x2 quad boxes (full-resolution mode)
 	int crop_x, crop_y, bin;
 };
 
@@ -199,15 +206,13 @@ __device__ __forceinline__ uchar4 finish(float r, float g, float b, float raw_pe
 }
 
 // Statistics on the Bayer quad grid, after lens shading, before WB:
-// zone means for AGC (all pixels) and AWB (unsaturated), a Y histogram and the AF measure.
+// zone means for AGC (all pixels) and AWB (unsaturated) and a Y histogram.
 __global__ void stats_kernel(const uint16_t* __restrict__ raw, int stride, StatParams sp, float* __restrict__ stats) {
 	__shared__ float zones[2][NZ][4];
 	__shared__ unsigned int hist[HIST_BINS];
-	__shared__ float af[5];
 	const int tid = threadIdx.y * blockDim.x + threadIdx.x, nthreads = blockDim.x * blockDim.y;
 	for (int i = tid; i < 2 * NZ * 4; i += nthreads) (&zones[0][0][0])[i] = 0.f;
 	for (int i = tid; i < HIST_BINS; i += nthreads) hist[i] = 0;
-	if (tid < 5) af[tid] = 0.f;
 	__syncthreads();
 
 	const int qx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -235,21 +240,6 @@ __global__ void stats_kernel(const uint16_t* __restrict__ raw, int stride, StatP
 		const float y = 0.299f * r + 0.587f * g + 0.114f * b;
 		atomicAdd(&hist[min((int)(y * HIST_BINS), HIST_BINS - 1)], 1u);
 
-		// AF: Laplacian energy of green in the window (step d on a d-subsampled grid), plus RGB means
-		const int d = sp.box ? 2 : 1;
-		if (qx >= sp.roi_x0 && qx < sp.roi_x1 && qy >= sp.roi_y0 && qy < sp.roi_y1) {
-			atomicAdd(&af[1], r);
-			atomicAdd(&af[2], g);
-			atomicAdd(&af[3], b);
-			if (!(qx % d) && !(qy % d)) {
-				const float c = focus_green(raw, stride, qy, qx, sp.box);
-				const float lap = 4.f * c - focus_green(raw, stride, qy - d, qx, sp.box) -
-				                  focus_green(raw, stride, qy + d, qx, sp.box) -
-				                  focus_green(raw, stride, qy, qx - d, sp.box) - focus_green(raw, stride, qy, qx + d, sp.box);
-				atomicAdd(&af[0], lap * lap);
-				atomicAdd(&af[4], 1.f);
-			}
-		}
 	}
 	__syncthreads();
 	for (int i = tid; i < 2 * NZ; i += nthreads) {
@@ -261,7 +251,43 @@ __global__ void stats_kernel(const uint16_t* __restrict__ raw, int stride, StatP
 	}
 	for (int i = tid; i < HIST_BINS; i += nthreads)
 		if (hist[i]) atomicAdd(&stats[ST_HIST + i], (float)hist[i]);
-	if (tid < 5 && af[tid] != 0.f) atomicAdd(&stats[ST_AF + tid], af[tid]);
+}
+
+// Focus statistics for the AF (like the Pi ISP's focus and AWB regions, on a finer grid): one
+// block per cell of the FX x FY grid, writing {sum of squared Laplacian of green, samples,
+// sum R, sum G, sum B, quads}. In full-resolution mode the Laplacian is taken on 2x2 quad boxes,
+// so it sees the same detail as in the binned modes.
+__global__ void focus_kernel(const uint16_t* __restrict__ raw, int stride, StatParams sp, float* __restrict__ cells) {
+	const int x0 = blockIdx.x * sp.qw / FX, x1 = (blockIdx.x + 1) * sp.qw / FX;
+	const int y0 = blockIdx.y * sp.qh / FY, y1 = (blockIdx.y + 1) * sp.qh / FY;
+	const int cw = x1 - x0, n = cw * (y1 - y0), d = sp.box ? 2 : 1, edge = 3;
+	float acc[CELL] = {0};
+	for (int i = threadIdx.x; i < n; i += blockDim.x) {
+		const int qx = x0 + i % cw, qy = y0 + i / cw;
+		acc[2] += raw_px(raw, stride, 2 * qy, 2 * qx);
+		acc[3] += quad_green(raw, stride, qy, qx);
+		acc[4] += raw_px(raw, stride, 2 * qy + 1, 2 * qx + 1);
+		acc[5] += 1.f;
+		if (qx % d || qy % d || qx < edge || qy < edge || qx >= sp.qw - edge || qy >= sp.qh - edge) continue;
+		const float lap = 4.f * focus_green(raw, stride, qy, qx, sp.box) - focus_green(raw, stride, qy - d, qx, sp.box) -
+		                  focus_green(raw, stride, qy + d, qx, sp.box) - focus_green(raw, stride, qy, qx - d, sp.box) -
+		                  focus_green(raw, stride, qy, qx + d, sp.box);
+		acc[0] += lap * lap;
+		acc[1] += 1.f;
+	}
+	__shared__ float part[32][CELL];
+	const int lane = threadIdx.x % 32, warp = threadIdx.x / 32, warps = blockDim.x / 32;
+	for (int k = 0; k < CELL; k++) {
+		float v = acc[k];
+		for (int o = 16; o > 0; o /= 2) v += __shfl_down_sync(0xffffffff, v, o);
+		if (!lane) part[warp][k] = v;
+	}
+	__syncthreads();
+	if (threadIdx.x < CELL) {
+		float v = 0.f;
+		for (int w = 0; w < warps; w++) v += part[w][threadIdx.x];
+		cells[(blockIdx.y * FX + blockIdx.x) * CELL + threadIdx.x] = v;
+	}
 }
 
 // Mean green per quad row, split into GRID_X column segments (flicker detector input).
@@ -497,32 +523,54 @@ static int dioptres_to_code(double d) {
 	                   (d - rpi::AF_MAP_D0) * (rpi::AF_MAP_C1 - rpi::AF_MAP_C0) / (rpi::AF_MAP_D1 - rpi::AF_MAP_D0));
 }
 
-// ---------------------------------------------------------------- autofocus (rpi.af, CDAF path)
+// ---------------------------------------------------------------- autofocus (rpi.af)
 
-// Port of the contrast-detect part of libcamera's rpi.af: coarse scan (with reversal if the
-// peak was not bracketed), fine scan back across the peak, parabolic peak fit, per-frame
-// slew limit on the lens, and in continuous mode a rescan only after the scene changes
-// and then holds still. (The Pi also uses PDAF, which the Jetson VI cannot capture.)
+// Port of libcamera's rpi.af. On the Pi it follows the phase-detect (PDAF) data the IMX708 sends
+// in its embedded lines, and falls back to contrast scans when those aren't good enough. The
+// Jetson VI doesn't pass embedded lines to V4L2, so this is rpi.af's contrast path on its own,
+// the way it runs on the Pi with a sensor that has no PDAF:
+//
+// - The focus measure and the R, G, B means are taken over the AF windows (up to 10, merged by
+//   area) on the focus statistics grid, or by default over the middle half of the width and
+//   middle third of the height.
+// - Auto mode scans when triggered. Continuous mode scans when it is entered, then again each
+//   time the contrast or colour in the windows changes by more than the retrigger ratio and
+//   then stays steady for retrigger_delay frames.
+// - A scan steps the lens coarsely until the contrast drops off (in continuous mode starting
+//   from where the lens is, and turning round if it set off the wrong way), finely back across
+//   the peak, then moves to the top of a parabola through the best three points.
+//
+// One addition: new windows restart a scan in progress, as rpi.af does on a sensor mode switch,
+// because the contrast recorded so far was measured somewhere else.
+struct AfWindow {
+	double x, y, w, h;  // fractions of the frame
+};
+
 struct AutoFocus {
-	enum Mode { MANUAL, AUTO, CONTINUOUS } mode = CONTINUOUS;
-	enum class Scan { Idle, Coarse1, Coarse2, Fine, Settle } scan = Scan::Idle;
+	enum Mode { MANUAL, AUTO, CONTINUOUS } mode = MANUAL;
+	enum class State { Idle, Scanning, Focused, Failed };  // libcamera's AfState
+	enum class Scan { Idle, Trigger, Coarse1, Coarse2, Fine, Settle } scan = Scan::Idle;
+	static constexpr size_t MAX_WINDOWS = 10;
 
 	// tuning, rescaled to the frame rate
 	double max_slew = rpi::AF_MAX_SLEW;
 	int step_frames = rpi::AF_STEP_FRAMES, retrigger_delay = rpi::AF_RETRIGGER_DELAY, skip_frames = rpi::AF_SKIP_FRAMES;
 
-	double ftarget = rpi::AF_FOCUS_DEFAULT, fsmooth = rpi::AF_FOCUS_DEFAULT;
+	std::vector<AfWindow> windows;
+	std::vector<double> weights;  // per focus cell; empty until computed for the current windows
+
 	bool initted = false;
-	int skip = 0, step_count = 0, scene_change_count = 0;
-	double scan_step = 0, scan_max = 0, scan_min = 1e9;
+	double ftarget = -1, fsmooth = -1;
+	double prev_contrast = 0, old_scene_contrast = 0;
+	double prev_average[3] = {0, 0, 0}, old_scene_average[3] = {0, 0, 0};
+	int skip_count = 0, step_count = 0, scene_change_count = 0;
 	size_t scan_max_index = 0;
-	struct Record {
+	double scan_max_contrast = 0, scan_min_contrast = 1e9, scan_step = 0;
+	struct ScanRecord {
 		double focus, contrast;
 	};
-	std::vector<Record> scan_data;
-	double old_contrast = 0, prev_contrast = 0;
-	double old_avg[3] = {0, 0, 0}, prev_avg[3] = {0, 0, 0};
-	bool focused = false;
+	std::vector<ScanRecord> scan_data;
+	State report_state = State::Idle;
 
 	void configure(int fps) {
 		max_slew = rpi::AF_MAX_SLEW * TUNING_FPS / fps;
@@ -531,28 +579,113 @@ struct AutoFocus {
 		skip_frames = rescale_frames(rpi::AF_SKIP_FRAMES, fps);
 	}
 
-	void start_programmed_scan() {
-		const double lo = rpi::AF_FOCUS_MIN, hi = rpi::AF_FOCUS_MAX, sc = rpi::AF_STEP_COARSE;
-		if (!initted || mode != CONTINUOUS || fsmooth <= lo + 2.0 * sc) {
-			ftarget = lo;
-			scan_step = sc;
-			scan = Scan::Coarse2;
-		} else if (fsmooth >= hi - 2.0 * sc) {
-			ftarget = hi;
-			scan_step = -sc;
-			scan = Scan::Coarse2;
-		} else {
-			scan_step = -sc;
-			scan = Scan::Coarse1;
-		}
-		scan_max = 0.0;
-		scan_min = 1e9;
-		scan_max_index = 0;
-		scan_data.clear();
-		step_count = step_frames;
-		focused = false;
+	// ---- controls (libcamera's AfMode, AfTrigger, AfMetering + AfWindows, LensPosition)
+
+	void set_mode(Mode m) {
+		if (mode == m) return;
+		mode = m;
+		if (m == CONTINUOUS)
+			scan = Scan::Trigger;
+		else if (m != AUTO || scan < Scan::Coarse1)
+			go_idle();
 	}
 
+	void trigger_scan() {
+		if (mode == AUTO && scan == Scan::Idle) scan = Scan::Trigger;
+	}
+
+	// No windows: the default one.
+	void set_windows(const std::vector<AfWindow>& w) {
+		windows.assign(w.begin(), w.begin() + std::min(w.size(), MAX_WINDOWS));
+		weights.clear();
+		if (scan >= Scan::Coarse1 && scan < Scan::Settle) start_programmed_scan();
+	}
+
+	// Manual mode, or forced (the starting position). Limited by the lens map, not the scan range.
+	void set_lens_position(double dioptres, bool force = false) {
+		if (mode != MANUAL && !force) return;
+		ftarget = std::clamp(dioptres, rpi::AF_MAP_D0, rpi::AF_MAP_D1);
+		update_lens_position();
+	}
+
+	// ---- per frame
+
+	// Focus measure and colour means in the windows, from the focus statistics (NF cells of
+	// {sharpness, samples, R, G, B, quads}). Scaled to the magnitudes of the Pi's statistics; the
+	// contrast is divided by the mean green squared, so it doesn't change with exposure.
+	void process(const float* cells) {
+		if (weights.empty()) compute_weights();
+		double sharp = 0, samples = 0, sum[3] = {0, 0, 0}, quads = 0;
+		for (int i = 0; i < NF; i++) {
+			const double w = weights[i];
+			if (w == 0) continue;
+			const float* c = &cells[i * CELL];
+			sharp += w * c[0];
+			samples += w * c[1];
+			for (int k = 0; k < 3; k++) sum[k] += w * c[2 + k];
+			quads += w * c[5];
+		}
+		quads = std::max(quads, 1e-9);
+		const double g = sum[1] / quads;
+		prev_contrast = sharp / std::max(samples, 1e-9) / std::max(g * g, 1e-6) * 1000.0;
+		for (int k = 0; k < 3; k++) prev_average[k] = sum[k] / quads * 1000.0;
+	}
+
+	// Runs the algorithm on the statistics from process() and sets the lens for the next frame.
+	void prepare() {
+		if (scan == Scan::Trigger) start_af();
+		if (initted) {
+			do_af(prev_contrast);
+			update_lens_position();
+		}
+	}
+
+	State state() const {
+		if (mode == AUTO && scan != Scan::Idle) return State::Scanning;
+		if (mode == MANUAL) return State::Idle;
+		return report_state;
+	}
+
+	const char* state_name() const {
+		if (mode == MANUAL) return "manual";
+		switch (state()) {
+		case State::Scanning:
+			return "scanning";
+		case State::Focused:
+			return "focused";
+		case State::Failed:
+			return "failed";
+		default:
+			return "idle";
+		}
+	}
+
+	// ---- rpi.af
+
+	// Weight of each focus cell: how much of it the windows cover, or 1 in the default window.
+	void compute_weights() {
+		weights.assign(NF, 0.0);
+		double sum = 0;
+		for (const AfWindow& w : windows) {
+			for (int r = 0; r < FY; r++) {
+				const double h = std::min((r + 1.0) / FY, w.y + w.h) - std::max((double)r / FY, w.y);
+				if (h <= 0) continue;
+				for (int c = 0; c < FX; c++) {
+					const double a = h * (std::min((c + 1.0) / FX, w.x + w.w) - std::max((double)c / FX, w.x));
+					if (a <= 0) continue;
+					weights[r * FX + c] += a;
+					sum += a;
+				}
+			}
+		}
+		if (sum == 0) {
+			for (int r = FY / 3; r < FY - FY / 3; r++)
+				for (int c = FX / 4; c < FX - FX / 4; c++) weights[r * FX + c] = 1;
+		}
+	}
+
+	// Lens position with the most contrast: a parabola through the best sample and its neighbours
+	// (or the two on one side, at the end of a scan).
 	double find_peak(size_t i) const {
 		double f = scan_data[i].focus;
 		if (scan_data.size() >= 3) {
@@ -575,20 +708,24 @@ struct AutoFocus {
 	}
 
 	void do_scan(double contrast) {
-		if (scan_data.empty() || contrast > scan_max) {
-			scan_max = contrast;
+		// Record lens position and contrast for the current scan
+		if (scan_data.empty() || contrast > scan_max_contrast) {
+			scan_max_contrast = contrast;
 			scan_max_index = scan_data.size();
-			if (scan != Scan::Fine) std::copy(prev_avg, prev_avg + 3, old_avg);
+			if (scan != Scan::Fine) std::copy(prev_average, prev_average + 3, old_scene_average);
 		}
-		scan_min = std::min(scan_min, contrast);
+		scan_min_contrast = std::min(scan_min_contrast, contrast);
 		scan_data.push_back({ftarget, contrast});
 
 		const double lo = rpi::AF_FOCUS_MIN, hi = rpi::AF_FOCUS_MAX, fine = rpi::AF_STEP_FINE;
 		if ((scan_step >= 0.0 && ftarget >= hi) || (scan_step <= 0.0 && ftarget <= lo) ||
-		    (scan == Scan::Fine && scan_data.size() >= 3) || contrast < rpi::AF_CONTRAST_RATIO * scan_max) {
+		    (scan == Scan::Fine && scan_data.size() >= 3) || contrast < rpi::AF_CONTRAST_RATIO * scan_max_contrast) {
+			// Finished a scan, at a limit or because the contrast dropped off. If this was the first
+			// coarse scan and the peak wasn't bracketed, reverse. After a fine scan, we're done.
+			// Otherwise start a fine scan in the opposite direction.
 			const double pk = find_peak(scan_max_index);
-			if (scan == Scan::Coarse1 && scan_data[0].contrast >= rpi::AF_CONTRAST_RATIO * scan_max) {
-				scan_step = -scan_step;  // started on the wrong side of the peak: reverse
+			if (scan == Scan::Coarse1 && scan_data[0].contrast >= rpi::AF_CONTRAST_RATIO * scan_max_contrast) {
+				scan_step = -scan_step;
 				scan = Scan::Coarse2;
 			} else if (scan == Scan::Fine || fine <= 0.0) {
 				ftarget = pk;
@@ -609,44 +746,42 @@ struct AutoFocus {
 		step_count = (ftarget == fsmooth) ? 0 : step_frames;
 	}
 
-	// One frame of AF: `contrast` is the focus measure, `avg` the R, G, B means of the AF window.
-	void process(double contrast, const double avg[3]) {
-		prev_contrast = contrast;
-		std::copy(avg, avg + 3, prev_avg);
-		if (skip > 0) {
-			skip--;
+	void do_af(double contrast) {
+		// Skip frames at startup
+		if (skip_count > 0) {
+			skip_count--;
 			return;
 		}
 		if (mode == MANUAL) return;
 
-		if (scan == Scan::Idle && mode == CONTINUOUS) {
+		if (scan < Scan::Coarse1 && mode == CONTINUOUS) {
 			// Not scanning: wait for a scene change, followed by stability.
 			const double r = rpi::AF_RETRIGGER_RATIO;
-			bool changed = contrast + 1.0 < r * old_contrast || old_contrast + 1.0 < r * contrast;
+			bool changed = contrast + 1.0 < r * old_scene_contrast || old_scene_contrast + 1.0 < r * contrast;
 			for (int c = 0; c < 3; c++)
-				changed |= avg[c] + 1.0 < r * old_avg[c] || old_avg[c] + 1.0 < r * avg[c];
+				changed |= prev_average[c] + 1.0 < r * old_scene_average[c] ||
+				           old_scene_average[c] + 1.0 < r * prev_average[c];
 			if (changed) {
-				old_contrast = contrast;
-				std::copy(avg, avg + 3, old_avg);
+				old_scene_contrast = contrast;
+				std::copy(prev_average, prev_average + 3, old_scene_average);
 				scene_change_count = 1;
 			} else if (scene_change_count) {
 				scene_change_count++;
 			}
-			if (scene_change_count >= retrigger_delay) {
-				scene_change_count = 0;
-				start_programmed_scan();
-			}
-		} else if (scan != Scan::Idle && fsmooth == ftarget) {
+			if (scene_change_count >= retrigger_delay) start_programmed_scan();
+		} else if (scan >= Scan::Coarse1 && fsmooth == ftarget) {
+			// Scanning. Wait step_frames for the statistics to catch up with the lens between steps,
+			// and to settle at the end.
 			if (step_count > 0) {
 				step_count--;
 			} else if (scan == Scan::Settle) {
-				focused = prev_contrast >= rpi::AF_CONTRAST_RATIO * scan_max &&
-				          scan_min <= rpi::AF_CONTRAST_RATIO * scan_max;
-				fprintf(stderr, "\nAF %s at %.2f dioptres (lens %d)\n", focused ? "focused" : "failed", fsmooth,
-				        dioptres_to_code(fsmooth));
+				report_state = prev_contrast >= rpi::AF_CONTRAST_RATIO * scan_max_contrast &&
+				                       scan_min_contrast <= rpi::AF_CONTRAST_RATIO * scan_max_contrast
+				                   ? State::Focused
+				                   : State::Failed;
 				scan = Scan::Idle;
 				scene_change_count = 0;
-				old_contrast = std::max(scan_max, prev_contrast);
+				old_scene_contrast = std::max(scan_max_contrast, prev_contrast);
 				scan_data.clear();
 			} else {
 				do_scan(contrast);
@@ -654,27 +789,50 @@ struct AutoFocus {
 		}
 	}
 
-	// Slew-limited lens target for this frame.
 	void update_lens_position() {
-		if (scan != Scan::Idle) ftarget = std::clamp(ftarget, rpi::AF_FOCUS_MIN, rpi::AF_FOCUS_MAX);
+		if (scan >= Scan::Coarse1) ftarget = std::clamp(ftarget, rpi::AF_FOCUS_MIN, rpi::AF_FOCUS_MAX);
 		if (initted) {
+			// from a known lens position: apply the slew rate limit
 			fsmooth = std::clamp(ftarget, fsmooth - max_slew, fsmooth + max_slew);
 		} else {
+			// from an unknown position: go straight to the target, but skip frames
 			fsmooth = ftarget;
 			initted = true;
-			skip = skip_frames;
+			skip_count = skip_frames;
 		}
 	}
 
-	const char* state() const {
-		switch (scan) {
-		case Scan::Idle:
-			return mode == MANUAL ? "manual" : focused ? "focused" : "idle";
-		case Scan::Settle:
-			return "settling";
-		default:
-			return "scanning";
+	void start_af() {
+		start_programmed_scan();
+		update_lens_position();
+	}
+
+	void start_programmed_scan() {
+		const double lo = rpi::AF_FOCUS_MIN, hi = rpi::AF_FOCUS_MAX, coarse = rpi::AF_STEP_COARSE;
+		if (!initted || mode != CONTINUOUS || fsmooth <= lo + 2.0 * coarse) {
+			ftarget = lo;
+			scan_step = coarse;
+			scan = Scan::Coarse2;
+		} else if (fsmooth >= hi - 2.0 * coarse) {
+			ftarget = hi;
+			scan_step = -coarse;
+			scan = Scan::Coarse2;
+		} else {
+			scan_step = -coarse;
+			scan = Scan::Coarse1;
 		}
+		scan_max_contrast = 0.0;
+		scan_min_contrast = 1e9;
+		scan_max_index = 0;
+		scan_data.clear();
+		step_count = step_frames;
+		report_state = State::Scanning;
+	}
+
+	void go_idle() {
+		scan = Scan::Idle;
+		report_state = State::Idle;
+		scan_data.clear();
 	}
 };
 
@@ -1302,10 +1460,26 @@ static std::string encoding_for(const std::string& path, const std::string& requ
 
 // ---------------------------------------------------------------- main
 
+// AF windows: groups of four numbers X Y W H, separated by spaces or commas.
+static std::vector<AfWindow> parse_af_windows(const char* s) {
+	std::vector<double> v;
+	for (char* end; *s; s = end) {
+		while (*s == ' ' || *s == ',') s++;
+		if (!*s) break;
+		const double x = strtod(s, &end);
+		if (end == s) return {};
+		v.push_back(x);
+	}
+	std::vector<AfWindow> w;
+	if (v.size() % 4) return w;
+	for (size_t i = 0; i < v.size(); i += 4) w.push_back({v[i], v[i + 1], v[i + 2], v[i + 3]});
+	return w;
+}
+
 static void usage(const char* argv0) {
 	fprintf(stderr,
-	        "usage: %s [--mode full|binned|crop|hdr] [--fps N] [--af continuous|auto|off] [--focus CODE]\n"
-	        "          [--sat X] [--flicker auto|50|60|off] [--device /dev/videoN] [SINK PIPELINE]\n"
+	        "usage: %s [--mode full|binned|crop|hdr] [--fps N] [--af continuous|auto|off] [--af-window X,Y,W,H[,...]]\n"
+	        "          [--focus CODE] [--sat X] [--flicker auto|50|60|off] [--device /dev/videoN] [SINK PIPELINE]\n"
 	        "       %s --still FILE [-e jpeg|png|bmp|yuv420|rgb] [--raw] [--timeout MS] [--quality Q] [...]\n"
 	        "  sensor modes (--mode, also 4608/2304/1536):\n"
 	        "    full   4608x2592, up to 14 fps (video output 2304x1296; stills full resolution)\n"
@@ -1313,16 +1487,24 @@ static void usage(const char* argv0) {
 	        "    crop   1536x864 2x2 binned centre crop, up to 120 fps\n"
 	        "    hdr    2304x1296 sensor HDR, 30 fps\n"
 	        "  --fps: video frame rate, default 30 (capped at the mode's maximum)\n"
+	        "  --af: continuous (default) refocuses when the scene changes; auto focuses once at the start\n"
+	        "  --af-window: areas autofocus looks at, as fractions of the frame, up to 10 (default: the\n"
+	        "               middle half of the width and middle third of the height)\n"
+	        "  --focus: manual focus at lens position CODE (445 = infinity .. 925 = closest)\n"
 	        "  SINK PIPELINE receives video/x-raw,format=RGBA (default: fakesink)\n"
 	        "  --still: default mode full; encoding from the extension or -e; --raw adds FILE.dng;\n"
-	        "           --timeout: ms of auto exposure/white balance/focus before the capture (default 3000)\n"
-	        "  stdin: f = autofocus scan, c = continuous AF, m CODE = manual focus (0-1023), q = quit\n",
+	        "           --timeout: ms of auto exposure/white balance/focus before the capture (default 3000);\n"
+	        "           a SINK PIPELINE gets the video frames until the capture\n"
+	        "  stdin: f = autofocus scan, c = continuous AF, w X Y W H [X Y W H ...] = AF windows\n"
+	        "         (w alone: default), m CODE = manual focus, q = quit\n",
 	        argv0, argv0);
 }
 
 int main(int argc, char** argv) {
 	std::string sink = "fakesink", device = "/dev/video0";
 	AutoFocus af;
+	AutoFocus::Mode af_mode = AutoFocus::CONTINUOUS;
+	std::vector<AfWindow> af_windows;
 	int manual_focus = -1, mode_idx = -1, fps_req = 30;
 	std::string still_path, encoding;
 	bool want_raw = false;
@@ -1348,10 +1530,13 @@ int main(int argc, char** argv) {
 			quality = atoi(argv[++i]);
 		} else if (a == "--af" && i + 1 < argc) {
 			std::string m = argv[++i];
-			af.mode = m == "off" ? AutoFocus::MANUAL : (m == "auto" || m == "once") ? AutoFocus::AUTO : AutoFocus::CONTINUOUS;
+			af_mode = m == "off" ? AutoFocus::MANUAL : (m == "auto" || m == "once") ? AutoFocus::AUTO : AutoFocus::CONTINUOUS;
+		} else if (a == "--af-window" && i + 1 < argc) {
+			af_windows = parse_af_windows(argv[++i]);
+			if (af_windows.empty()) return usage(argv[0]), 1;
 		} else if (a == "--focus" && i + 1 < argc) {
 			manual_focus = atoi(argv[++i]);
-			af.mode = AutoFocus::MANUAL;
+			af_mode = AutoFocus::MANUAL;
 		} else if (a == "--sat" && i + 1 < argc) {
 			sat = atof(argv[++i]);
 		} else if (a == "--flicker" && i + 1 < argc) {
@@ -1378,7 +1563,6 @@ int main(int argc, char** argv) {
 			fprintf(stderr, "unknown encoding %s\n", encoding.c_str());
 			return 1;
 		}
-		sink = "fakesink";
 	}
 
 	signal(SIGINT, on_signal);
@@ -1395,8 +1579,16 @@ int main(int argc, char** argv) {
 	agc.flicker_us = flicker.period_us;
 	Awb awb;
 	awb.configure(fps);
+	// As libcamera starts the IPA: lens at the default (or the manual) position, then the controls.
+	// In auto mode rpicam-apps triggers a scan as the camera starts.
 	af.configure(fps);
-	if (af.mode == AutoFocus::MANUAL && manual_focus >= 0) af.ftarget = af.fsmooth = code_to_dioptres(manual_focus);
+	af.set_lens_position(manual_focus >= 0 ? code_to_dioptres(manual_focus) : rpi::AF_FOCUS_DEFAULT, true);
+	af.set_windows(af_windows);
+	af.set_mode(af_mode);
+	af.trigger_scan();
+	float* d_focus;
+	CK(cudaMalloc(&d_focus, NF * CELL * sizeof(float)));
+	std::vector<float> h_focus(NF * CELL);
 
 	auto write_sensor = [&](double e, double g) {
 		cam.set_ctrl64(CID_EXPOSURE, (int64_t)lround(e));
@@ -1442,20 +1634,19 @@ int main(int argc, char** argv) {
 	IspParams prm{};
 	prm.sat = sat;
 	prm.crop_x = mode.crop_x, prm.crop_y = mode.crop_y, prm.bin = mode.bin;
-	// AF window: centre quarter of the frame (half width, half height).
-	// Full-res mode measures on 2x2-averaged quads to suppress noise.
-	StatParams sp{qw, qh, qw / 4, 3 * qw / 4, qh / 4, 3 * qh / 4, mode.superpixel ? 1 : 0,
-	              mode.crop_x, mode.crop_y, mode.bin};
+	// Full-res mode measures focus on 2x2-averaged quads to suppress noise.
+	StatParams sp{qw, qh, mode.superpixel ? 1 : 0, mode.crop_x, mode.crop_y, mode.bin};
 	const dim3 block(32, 8);
 	const dim3 sgrid((qw + 31) / 32, (qh + 7) / 8), ogrid((ow + 31) / 32, (oh + 7) / 8);
 	int frames = 0, frames_since = 0, dropped = 0;
-	double t_last = now_s(), proc_ms = 0, contrast = 0;
-	bool af_started = false;
+	double t_last = now_s(), proc_ms = 0;
+	std::string af_reported;
 	fprintf(stderr, "sensor %s %dx%d @ %d fps -> %s\n", mode.name, cam.w, cam.h, fps,
 	        still ? still_path.c_str() : sink.c_str());
 	const double t_start = now_s();
 
 	bool stdin_open = true;
+	std::string input;  // stdin not yet split into lines
 	while (!g_quit) {
 		pollfd pf[2] = {{cam.fd, POLLIN, 0}, {stdin_open ? STDIN_FILENO : -1, POLLIN, 0}};
 		int n = poll(pf, 2, 2000);
@@ -1465,24 +1656,38 @@ int main(int argc, char** argv) {
 			break;
 		}
 
-		if (pf[1].revents & POLLIN) {
-			char line[64] = {0};
-			if (!fgets(line, sizeof line, stdin)) {
+		// stdin is read with read() rather than fgets(): stdio would hold back a second command
+		// sent in the same write, and poll() wouldn't report it until more input arrived.
+		bool quit = false;
+		if (pf[1].revents & (POLLIN | POLLHUP)) {
+			char buf[256];
+			const ssize_t len = read(STDIN_FILENO, buf, sizeof buf);
+			if (len > 0) {
+				input.append(buf, len);
+			} else if (len == 0 || errno != EINTR) {
 				stdin_open = false;  // EOF: stop polling it, or poll() returns at once forever
-			} else if (line[0] == 'q') {
-				break;
-			} else if (line[0] == 'f') {
-				if (af.mode == AutoFocus::MANUAL) af.mode = AutoFocus::AUTO;
-				af.start_programmed_scan();
-			} else if (line[0] == 'c') {
-				af.mode = AutoFocus::CONTINUOUS;
-				af.start_programmed_scan();
-			} else if (line[0] == 'm') {
-				af.mode = AutoFocus::MANUAL;
-				af.scan = AutoFocus::Scan::Idle;
-				af.ftarget = code_to_dioptres(atoi(line + 1));
+				if (!input.empty()) input += '\n';
+			}
+			for (size_t nl; !quit && (nl = input.find('\n')) != std::string::npos;) {
+				const std::string cmd = input.substr(0, nl);
+				input.erase(0, nl + 1);
+				const char* line = cmd.c_str();
+				if (line[0] == 'q') {
+					quit = true;
+				} else if (line[0] == 'f') {
+					af.set_mode(AutoFocus::AUTO);
+					af.trigger_scan();
+				} else if (line[0] == 'w') {
+					af.set_windows(parse_af_windows(line + 1));
+				} else if (line[0] == 'c') {
+					af.set_mode(AutoFocus::CONTINUOUS);
+				} else if (line[0] == 'm') {
+					af.set_mode(AutoFocus::MANUAL);
+					af.set_lens_position(code_to_dioptres(atoi(line + 1)));
+				}
 			}
 		}
+		if (quit) break;
 		if (!(pf[0].revents & POLLIN)) continue;
 
 		double ts = 0;
@@ -1505,6 +1710,7 @@ int main(int argc, char** argv) {
 
 		CK(cudaMemset(d_stats, 0, ST_COUNT * sizeof(float)));
 		stats_kernel<<<sgrid, block>>>(d_raw, cam.stride, sp, d_stats);
+		focus_kernel<<<dim3(FX, FY), 256>>>(d_raw, cam.stride, sp, d_focus);
 		rows_kernel<<<qh, 256>>>(d_raw, cam.stride, qw, d_rowseg);
 		const int slot = ring.acquire();
 		if (slot >= 0) {
@@ -1515,6 +1721,7 @@ int main(int argc, char** argv) {
 		}
 		CK(cudaGetLastError());
 		CK(cudaMemcpy(h_stats.data(), d_stats, ST_COUNT * sizeof(float), cudaMemcpyDeviceToHost));
+		CK(cudaMemcpy(h_focus.data(), d_focus, NF * CELL * sizeof(float), cudaMemcpyDeviceToHost));
 		CK(cudaMemcpy(h_rowseg.data(), d_rowseg, h_rowseg.size() * sizeof(float), cudaMemcpyDeviceToHost));
 		CK(cudaDeviceSynchronize());
 		proc_ms += (now_s() - t0) * 1e3;
@@ -1570,23 +1777,20 @@ int main(int argc, char** argv) {
 			write_sensor(agc.exposure_us, agc.again);
 		}
 
-		// AF: normalised focus measure and window colour means, scaled to the Pi's magnitudes
-		const float* afs = &h_stats[ST_AF];
-		const double win_n = std::max(1.0, (double)(sp.roi_x1 - sp.roi_x0) * (sp.roi_y1 - sp.roi_y0));
-		const double wg = afs[2] / win_n;
-		contrast = afs[0] / std::max(1.0f, afs[4]) / std::max(wg * wg, 1e-6) * 1000.0;
-		const double avg[3] = {afs[1] / win_n * 1000.0, afs[2] / win_n * 1000.0, afs[3] / win_n * 1000.0};
-		if (!af_started && frames > 2) {
-			af_started = true;
-			af.update_lens_position();  // move to the default (or manual) position, then skip frames
-		} else if (af_started) {
-			af.process(contrast, avg);
-			af.update_lens_position();
+		// AF (the first frames can be left over from before the sensor started)
+		if (frames > 2) {
+			af.process(h_focus.data());
+			af.prepare();
+			if (af_reported != af.state_name()) {
+				af_reported = af.state_name();
+				fprintf(stderr, "\nAF %s at %.2f dioptres (lens %d)\n", af_reported.c_str(), af.fsmooth,
+				        dioptres_to_code(af.fsmooth));
+			}
 		}
 		vcm.set(dioptres_to_code(af.fsmooth));
 
 		// Still: once the timeout has passed and focus is not moving, capture this frame.
-		const bool af_busy = af.mode != AutoFocus::MANUAL && af.scan != AutoFocus::Scan::Idle;
+		const bool af_busy = af.state() == AutoFocus::State::Scanning;
 		const double elapsed_ms = (now_s() - t_start) * 1e3;
 		if (still && elapsed_ms >= timeout_ms && (!af_busy || elapsed_ms >= timeout_ms + 5000)) {
 			fprintf(stderr, "\ncapturing: exp %.0f us, ag %.2f, dg %.2f, CT %.0fK, lens %d\n", dc.frame_exposure(),
@@ -1638,7 +1842,8 @@ int main(int argc, char** argv) {
 			        "CT %4.0fK | AF %.2f D (lens %d) %s contrast %.0f   ",
 			        frames_since / (t - t_last), proc_ms / frames_since, agc.exposure_us, agc.again, agc.dgain,
 			        flicker.period_us == 10000 ? "flicker 100Hz " : flicker.period_us > 0 ? "flicker 120Hz " : "",
-			        agc.lux, agc.measured_y, agc.target_y, awb.ct, af.fsmooth, vcm.pos, af.state(), contrast);
+			        agc.lux, agc.measured_y, agc.target_y, awb.ct, af.fsmooth, vcm.pos, af.state_name(),
+			        af.prev_contrast);
 			if (dropped) fprintf(stderr, "drop %d ", dropped);
 			t_last = t;
 			frames_since = 0;
@@ -1658,6 +1863,7 @@ int main(int argc, char** argv) {
 	ring.free_all();
 	cudaFree(d_raw);
 	cudaFree(d_stats);
+	cudaFree(d_focus);
 	cudaFree(d_rowseg);
 	return g_quit == 2 ? 1 : 0;
 }

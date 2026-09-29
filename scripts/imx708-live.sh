@@ -13,9 +13,10 @@
 #                                                  # --raw also writes <out>.dng
 #
 # Options: --mode full|binned|crop|hdr   4608x2592 (<=14 fps) | 2304x1296 (<=56) | 1536x864 (<=120) | HDR 2304x1296 (30)
-#          --fps N (default 30), --af continuous|auto|off, --focus CODE (manual, 0-1023),
-#          --flicker auto|50|60|off, --sat X
-# While running, type: f = autofocus scan, c = continuous AF, m N = manual focus, q = quit
+#          --fps N (default 30), --af continuous|auto|off, --af-window X,Y,W,H[,...] (fractions of the frame),
+#          --focus CODE (manual, 445-925), --flicker auto|50|60|off, --sat X
+# While running, type: f = focus once, c = continuous AF, w X Y W H [...] = AF windows (w alone: default),
+#                      m N = manual focus, q = quit
 set -e
 dir=$(cd "$(dirname "$0")" && pwd)
 bin="$dir/../isp/imx708-live"

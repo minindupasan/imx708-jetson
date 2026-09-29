@@ -86,16 +86,36 @@ Options:
 
 ```
 --fps N                      frame rate (default 30)
---af continuous|auto|off     autofocus mode
---focus CODE                 manual lens position, 0-1023 (about 445 is infinity)
+--af continuous|auto|off     autofocus mode (default continuous; auto focuses once at the start)
+--af-window X,Y,W,H[,...]    areas autofocus looks at, as fractions of the frame, up to 10
+                             (default: the middle half of the width, middle third of the height)
+--focus CODE                 manual lens position, 445 (infinity) to 925 (closest)
 --flicker auto|50|60|off     mains flicker avoidance
 --sat X                      saturation
 --timeout MS                 stills: time to settle AE/AWB/AF before capture (default 3000)
 --quality Q                  JPEG quality (default 93)
 ```
 
-While it runs, type `f` + Enter for a focus scan, `c` for continuous AF, `m 600` to set the lens
-position, and `q` to quit.
+While it runs, these commands (one per line) on stdin work like libcamera's AF controls:
+
+```
+f                      auto mode, and scan once (AfModeAuto + AfTrigger)
+c                      continuous mode (AfModeContinuous)
+w X Y W H [X Y W H…]   autofocus windows, fractions of the frame (AfWindows); w alone: default
+m CODE                 manual mode, lens at CODE (AfModeManual + LensPosition)
+q                      quit
+```
+
+Each change of AF state is printed as a line such as `AF focused at 2.74 dioptres (lens 533)`
+(idle, scanning, focused, failed or manual).
+
+Autofocus is `rpi.af`'s contrast path: it scans the lens for the position where the windows are
+sharpest and, in continuous mode, scans again when the scene in them changes and then holds
+still. On the Pi the sensor's phase-detect pixels usually do this instead, but the Jetson can't
+read them out. Like on the Pi, a plain subject in front of a detailed background loses to the
+background unless a window is put on it: an application that wants faces in focus detects them
+and sets the windows (as `imx708-depth` does). A new window during a scan starts the scan again;
+otherwise, as on the Pi, it only changes what is measured.
 
 `imx708-live` can also be used directly with any GStreamer sink pipeline, see
 `isp/imx708-live --help`.
@@ -113,7 +133,8 @@ Statistics from each frame drive ports of these Raspberry Pi libcamera algorithm
 - `rpi.awb`: Bayesian white balance along the calibrated colour temperature curve
 - `rpi.alsc`: lens shading tables (the calibrated tables only, not the adaptive part)
 - `rpi.ccm`, `rpi.contrast`: colour matrices by colour temperature and the gamma curve
-- `rpi.af`: contrast-detect autofocus (the Jetson can't capture the sensor's PDAF data)
+- `rpi.af`: autofocus, the contrast-detect path (the Jetson can't capture the sensor's PDAF
+  data), on a 64x48 grid of focus statistics
 
 Mains flicker is detected from rolling-shutter banding, and exposure is then kept to whole flicker
 periods. The focus motor (DW9817) is driven over I2C with the same small ramped steps as the Pi's

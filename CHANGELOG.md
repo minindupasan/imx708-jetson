@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.1 - 2026-09-29
 
 - `imx708-live`: autofocus rewritten as a closer port of `rpi.af`: the same scan states, AF
   windows merged over a focus statistics grid, the Pi's default window, and the Pi's handling of
